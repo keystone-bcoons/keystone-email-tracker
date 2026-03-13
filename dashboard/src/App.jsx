@@ -24,10 +24,8 @@ function isAutoReply(subject = "", clientEmail = "") {
   const e = clientEmail.toLowerCase();
   return (
     AUTO_REPLY_PATTERNS.some(p => s.includes(p)) ||
-    e.includes("noreply") ||
-    e.includes("no-reply") ||
-    e.includes("donotreply") ||
-    e.includes("notifications@") ||
+    e.includes("noreply") || e.includes("no-reply") ||
+    e.includes("donotreply") || e.includes("notifications@") ||
     e.includes("mailer-daemon")
   );
 }
@@ -38,8 +36,14 @@ function isInternal(clientEmail = "") {
 
 function fmtDays(d) {
   if (d === null || d === undefined) return "—";
-  if (d < 1) return `${Math.round(d * 24)}h`;
-  return `${d.toFixed(1)}d`;
+  const totalMins = Math.round(d * 24 * 60);
+  if (totalMins < 60) return `${totalMins}m`;
+  const hours = Math.floor(totalMins / 60);
+  const mins  = totalMins % 60;
+  if (hours < 24) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remH = hours % 24;
+  return remH > 0 ? `${days}d ${remH}h` : `${days}d`;
 }
 
 function bucketLabel(days) {
@@ -73,7 +77,7 @@ function CustomTooltip({ active, payload, label }) {
 }
 
 function exportCSV(rows) {
-  const headers = ["Date", "Team Member", "Client Email", "Client Name", "Subject", "Response Time (Days)", "Within Target"];
+  const headers = ["Date", "Team Member", "Client Email", "Client Name", "Subject", "Response Time", "Within Target"];
   const lines = [
     headers.join(","),
     ...rows.map(r => [
@@ -82,7 +86,7 @@ function exportCSV(rows) {
       r.client_email || "",
       r.client_name || "",
       `"${(r.subject || "").replace(/"/g, '""')}"`,
-      r.response_days,
+      fmtDays(r.response_days),
       r.within_target ? "Yes" : "No",
     ].join(",")),
   ];
@@ -95,6 +99,11 @@ function exportCSV(rows) {
   URL.revokeObjectURL(url);
 }
 
+function SortIcon({ active, dir }) {
+  if (!active) return <span className="sort-icon sort-inactive">↕</span>;
+  return <span className="sort-icon sort-active">{dir === "asc" ? "↑" : "↓"}</span>;
+}
+
 export default function App() {
   const [responses, setResponses]   = useState([]);
   const [loading, setLoading]       = useState(true);
@@ -102,7 +111,7 @@ export default function App() {
   const [lastSynced, setLastSynced] = useState(null);
   const [page, setPage]             = useState(1);
 
-  // Filters
+  // Top filters
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date(); d.setMonth(d.getMonth() - 3);
     return d.toISOString().split("T")[0];
@@ -110,8 +119,23 @@ export default function App() {
   const [dateTo, setDateTo]           = useState(() => new Date().toISOString().split("T")[0]);
   const [teamMember, setTeamMember]   = useState("All");
   const [targetHours, setTargetHours] = useState(48);
-  const [emailSource, setEmailSource] = useState("clients"); // "clients" | "all"
+  const [emailSource, setEmailSource] = useState("clients");
   const [excludeAutoReply, setExcludeAutoReply] = useState(true);
+
+  // Column filters
+  const [colClient,  setColClient]  = useState("");
+  const [colSubject, setColSubject] = useState("");
+  const [colTarget,  setColTarget]  = useState("all");
+
+  // Sorting
+  const [sortCol, setSortCol] = useState("inbound_at");
+  const [sortDir, setSortDir] = useState("desc");
+
+  function handleSort(col) {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("desc"); }
+    setPage(1);
+  }
 
   useEffect(() => {
     async function load() {
@@ -125,7 +149,6 @@ export default function App() {
           .gte("inbound_at", dateFrom)
           .lte("inbound_at", dateTo + "T23:59:59Z")
           .order("inbound_at", { ascending: false });
-
         if (err) throw err;
         setResponses(data || []);
 
@@ -149,6 +172,7 @@ export default function App() {
     return ["All", ...names.sort()];
   }, [responses]);
 
+  // Top-filtered rows (drives KPIs + chart)
   const filtered = useMemo(() => {
     return responses
       .filter(r => teamMember === "All" || r.team_member_name === teamMember || r.team_member_email === teamMember)
@@ -157,12 +181,33 @@ export default function App() {
       .map(r => ({ ...r, within_target: r.response_days <= targetHours / 24 }));
   }, [responses, teamMember, targetHours, emailSource, excludeAutoReply]);
 
+  // Column-filtered + sorted rows (drives table)
+  const tableRows = useMemo(() => {
+    let rows = filtered
+      .filter(r => !colClient  || (r.client_name || r.client_email || "").toLowerCase().includes(colClient.toLowerCase()))
+      .filter(r => !colSubject || (r.subject || "").toLowerCase().includes(colSubject.toLowerCase()))
+      .filter(r => colTarget === "all" || (colTarget === "yes" ? r.within_target : !r.within_target));
+
+    rows = [...rows].sort((a, b) => {
+      let av, bv;
+      if      (sortCol === "inbound_at") { av = a.inbound_at; bv = b.inbound_at; }
+      else if (sortCol === "client")     { av = (a.client_name || a.client_email || "").toLowerCase(); bv = (b.client_name || b.client_email || "").toLowerCase(); }
+      else if (sortCol === "member")     { av = (a.team_member_name || "").toLowerCase(); bv = (b.team_member_name || "").toLowerCase(); }
+      else if (sortCol === "subject")    { av = (a.subject || "").toLowerCase(); bv = (b.subject || "").toLowerCase(); }
+      else if (sortCol === "response")   { av = a.response_days; bv = b.response_days; }
+      else if (sortCol === "target")     { av = a.within_target ? 1 : 0; bv = b.within_target ? 1 : 0; }
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return rows;
+  }, [filtered, colClient, colSubject, colTarget, sortCol, sortDir]);
+
   // KPIs
   const totalResponses = filtered.length;
   const withinTarget   = filtered.filter(r => r.within_target).length;
   const pctWithin      = totalResponses ? (withinTarget / totalResponses * 100).toFixed(1) : "0.0";
-  const avgDays        = totalResponses
-    ? filtered.reduce((s, r) => s + r.response_days, 0) / totalResponses : 0;
+  const avgDays        = totalResponses ? filtered.reduce((s, r) => s + r.response_days, 0) / totalResponses : 0;
   const totalEmails    = useMemo(() => new Set(filtered.map(r => r.inbound_message_id)).size, [filtered]);
 
   // Chart
@@ -172,12 +217,14 @@ export default function App() {
     return BUCKET_ORDER.map(b => ({ label: b, count: counts[b] }));
   }, [filtered]);
 
-  const barColor = (label) =>
+  const barColor = label =>
     label === "< 1 Day" || label === "1–2 Days" ? "#2563eb" : "#93c5fd";
 
   // Pagination
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(tableRows.length / PAGE_SIZE));
+  const paginated  = tableRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  const hasColFilters = colClient || colSubject || colTarget !== "all";
 
   return (
     <div className="app">
@@ -204,25 +251,25 @@ export default function App() {
         <div className="top-filter-group">
           <label className="filter-label">Date Range</label>
           <div className="date-range">
-            <input type="date" className="filter-input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+            <input type="date" className="filter-input" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPage(1); }} />
             <span className="date-sep">→</span>
-            <input type="date" className="filter-input" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+            <input type="date" className="filter-input" value={dateTo} onChange={e => { setDateTo(e.target.value); setPage(1); }} />
           </div>
         </div>
         <div className="top-filter-group">
           <label className="filter-label">Team Member</label>
-          <select className="filter-input" value={teamMember} onChange={e => setTeamMember(e.target.value)}>
+          <select className="filter-input" value={teamMember} onChange={e => { setTeamMember(e.target.value); setPage(1); }}>
             {teamMembers.map(m => <option key={m}>{m}</option>)}
           </select>
         </div>
         <div className="top-filter-group">
           <label className="filter-label">Target Hours</label>
           <input type="number" className="filter-input filter-input-sm" value={targetHours} min={1} max={240}
-            onChange={e => setTargetHours(Number(e.target.value))} />
+            onChange={e => { setTargetHours(Number(e.target.value)); setPage(1); }} />
         </div>
         <div className="top-filter-group">
           <label className="filter-label">Include Emails From</label>
-          <select className="filter-input" value={emailSource} onChange={e => setEmailSource(e.target.value)}>
+          <select className="filter-input" value={emailSource} onChange={e => { setEmailSource(e.target.value); setPage(1); }}>
             <option value="clients">Clients Only</option>
             <option value="all">All</option>
           </select>
@@ -230,7 +277,7 @@ export default function App() {
         <div className="top-filter-group">
           <label className="filter-label">Auto-Replies</label>
           <select className="filter-input" value={excludeAutoReply ? "exclude" : "include"}
-            onChange={e => setExcludeAutoReply(e.target.value === "exclude")}>
+            onChange={e => { setExcludeAutoReply(e.target.value === "exclude"); setPage(1); }}>
             <option value="exclude">Exclude</option>
             <option value="include">Include</option>
           </select>
@@ -245,11 +292,11 @@ export default function App() {
 
         {/* KPI Row */}
         <div className="kpi-row">
-          <KpiCard label="Total Emails"            value={loading ? "—" : totalEmails.toLocaleString()} />
-          <KpiCard label="Total Responses"         value={loading ? "—" : totalResponses.toLocaleString()} />
-          <KpiCard label="Within Target"           value={loading ? "—" : withinTarget.toLocaleString()} />
-          <KpiCard label="% Within Target"         value={loading ? "—" : `${pctWithin}%`} />
-          <KpiCard label="Avg Response Time"       value={loading ? "—" : fmtDays(avgDays)} sub="business days" />
+          <KpiCard label="Total Emails"      value={loading ? "—" : totalEmails.toLocaleString()} />
+          <KpiCard label="Total Responses"   value={loading ? "—" : totalResponses.toLocaleString()} />
+          <KpiCard label="Within Target"     value={loading ? "—" : withinTarget.toLocaleString()} />
+          <KpiCard label="% Within Target"   value={loading ? "—" : `${pctWithin}%`} />
+          <KpiCard label="Avg Response Time" value={loading ? "—" : fmtDays(avgDays)} sub="business hours" />
         </div>
 
         {/* Chart */}
@@ -281,21 +328,61 @@ export default function App() {
         {!loading && filtered.length > 0 && (
           <div className="table-card">
             <div className="table-header">
-              <h2 className="chart-title">Recent Responses</h2>
-              <button className="export-btn" onClick={() => exportCSV(filtered)}>
+              <div className="table-header-left">
+                <h2 className="chart-title">Recent Responses</h2>
+                {hasColFilters && (
+                  <button className="clear-filters-btn" onClick={() => { setColClient(""); setColSubject(""); setColTarget("all"); }}>
+                    ✕ Clear column filters
+                  </button>
+                )}
+              </div>
+              <button className="export-btn" onClick={() => exportCSV(tableRows)}>
                 ↓ Export CSV
               </button>
             </div>
             <div className="table-wrap">
               <table className="resp-table">
                 <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Team Member</th>
-                    <th>Client</th>
-                    <th>Subject</th>
-                    <th>Response Time</th>
-                    <th>Within Target</th>
+                  <tr className="th-labels">
+                    <th onClick={() => handleSort("inbound_at")} className="th-sortable">
+                      Date <SortIcon active={sortCol === "inbound_at"} dir={sortDir} />
+                    </th>
+                    <th onClick={() => handleSort("member")} className="th-sortable">
+                      Team Member <SortIcon active={sortCol === "member"} dir={sortDir} />
+                    </th>
+                    <th onClick={() => handleSort("client")} className="th-sortable">
+                      Client <SortIcon active={sortCol === "client"} dir={sortDir} />
+                    </th>
+                    <th onClick={() => handleSort("subject")} className="th-sortable">
+                      Subject <SortIcon active={sortCol === "subject"} dir={sortDir} />
+                    </th>
+                    <th onClick={() => handleSort("response")} className="th-sortable">
+                      Response Time <SortIcon active={sortCol === "response"} dir={sortDir} />
+                    </th>
+                    <th onClick={() => handleSort("target")} className="th-sortable">
+                      Within Target <SortIcon active={sortCol === "target"} dir={sortDir} />
+                    </th>
+                  </tr>
+                  <tr className="th-filters">
+                    <td></td>
+                    <td></td>
+                    <td>
+                      <input className="col-filter-input" placeholder="Filter client…"
+                        value={colClient} onChange={e => { setColClient(e.target.value); setPage(1); }} />
+                    </td>
+                    <td>
+                      <input className="col-filter-input" placeholder="Filter subject…"
+                        value={colSubject} onChange={e => { setColSubject(e.target.value); setPage(1); }} />
+                    </td>
+                    <td></td>
+                    <td>
+                      <select className="col-filter-input" value={colTarget}
+                        onChange={e => { setColTarget(e.target.value); setPage(1); }}>
+                        <option value="all">All</option>
+                        <option value="yes">✓ Within</option>
+                        <option value="no">✗ Over</option>
+                      </select>
+                    </td>
                   </tr>
                 </thead>
                 <tbody>
@@ -313,6 +400,9 @@ export default function App() {
                       </td>
                     </tr>
                   ))}
+                  {paginated.length === 0 && (
+                    <tr><td colSpan={6} className="td-empty">No results match your filters.</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -320,7 +410,7 @@ export default function App() {
             {/* Pagination */}
             <div className="pagination">
               <span className="pagination-info">
-                Showing {((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length.toLocaleString()} responses
+                Showing {tableRows.length === 0 ? 0 : ((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, tableRows.length)} of {tableRows.length.toLocaleString()} responses
               </span>
               <div className="pagination-controls">
                 <button className="page-btn" onClick={() => setPage(1)} disabled={page === 1}>«</button>
