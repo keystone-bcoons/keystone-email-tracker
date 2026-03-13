@@ -107,6 +107,7 @@ function SortIcon({ active, dir }) {
 export default function App() {
   const [responses, setResponses]   = useState([]);
   const [loading, setLoading]       = useState(true);
+  const [loadingMsg, setLoadingMsg] = useState("Loading…");
   const [error, setError]           = useState(null);
   const [lastSynced, setLastSynced] = useState(null);
   const [page, setPage]             = useState(1);
@@ -140,17 +141,29 @@ export default function App() {
   useEffect(() => {
     async function load() {
       setLoading(true);
+      setLoadingMsg("Loading…");
       setError(null);
       setPage(1);
       try {
-        const { data, error: err } = await supabase
-          .from("email_responses")
-          .select("*")
-          .gte("inbound_at", dateFrom)
-          .lte("inbound_at", dateTo + "T23:59:59Z")
-          .order("inbound_at", { ascending: false });
-        if (err) throw err;
-        setResponses(data || []);
+        // Paginate through all records — Supabase default limit is 1000
+        let allData = [];
+        let from = 0;
+        const batchSize = 1000;
+        while (true) {
+          setLoadingMsg(`Loading… (${allData.length} records)`);
+          const { data, error: err } = await supabase
+            .from("email_responses")
+            .select("*")
+            .gte("inbound_at", dateFrom)
+            .lte("inbound_at", dateTo + "T23:59:59Z")
+            .order("inbound_at", { ascending: false })
+            .range(from, from + batchSize - 1);
+          if (err) throw err;
+          allData = [...allData, ...(data || [])];
+          if (!data || data.length < batchSize) break;
+          from += batchSize;
+        }
+        setResponses(allData);
 
         const { data: syncData } = await supabase
           .from("sync_state")
@@ -296,7 +309,7 @@ export default function App() {
           <KpiCard label="Total Responses"   value={loading ? "—" : totalResponses.toLocaleString()} />
           <KpiCard label="Within Target"     value={loading ? "—" : withinTarget.toLocaleString()} />
           <KpiCard label="% Within Target"   value={loading ? "—" : `${pctWithin}%`} />
-          <KpiCard label="Avg Response Time" value={loading ? "—" : fmtDays(avgDays)} sub="business hours" />
+          <KpiCard label="Avg Response Time" value={loading ? loadingMsg : fmtDays(avgDays)} sub={loading ? "" : "business hours"} />
         </div>
 
         {/* Chart */}
@@ -304,7 +317,7 @@ export default function App() {
           <h2 className="chart-title">Response Time Distribution</h2>
           <p className="chart-sub">Count of email responses by business day bucket</p>
           {loading ? (
-            <div className="chart-loading">Loading…</div>
+            <div className="chart-loading">{loadingMsg}</div>
           ) : totalResponses === 0 ? (
             <div className="chart-loading">No responses found for selected filters.</div>
           ) : (
