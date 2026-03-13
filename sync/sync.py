@@ -154,6 +154,8 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
     by_conv: dict[str, list[dict]] = {}
     for m in messages:
         cid = m.get("conversation_id", "")
+        if not cid:
+            continue
         by_conv.setdefault(cid, []).append(m)
 
     responses = []
@@ -163,9 +165,11 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
         for i, msg in enumerate(thread):
             if msg["direction"] != "inbound":
                 continue
+            # Find first outbound in same thread after this inbound
+            # (any outbound counts — handles delegates, aliases, shared sending)
             reply = next(
                 (m for m in thread[i + 1:]
-                 if m["direction"] == "outbound" and m["received_at"] > msg["received_at"]),
+                 if m["direction"] == "outbound"),
                 None,
             )
             if not reply:
