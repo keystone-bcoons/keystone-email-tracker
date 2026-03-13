@@ -1,2 +1,4 @@
 requests==2.31.0
-supabase==2.4.0
+supabase==2.3.4
+gotrue==2.3.0
+httpx==0.24.1
