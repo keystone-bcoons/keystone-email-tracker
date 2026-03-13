@@ -14,6 +14,7 @@ Required environment variables:
 
 import os
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 import requests
@@ -53,11 +54,23 @@ def get_access_token() -> str:
     return resp.json()["access_token"]
 
 
-def graph_get(token: str, url: str, params: dict = None) -> dict:
+def graph_get(token: str, url: str, params: dict = None, retries: int = 3) -> dict:
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers, params=params)
-    resp.raise_for_status()
-    return resp.json()
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
+            if resp.status_code == 504:
+                wait = 30 * (attempt + 1)
+                log.warning(f"504 timeout, retrying in {wait}s (attempt {attempt+1}/{retries})")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError as e:
+            if attempt == retries - 1:
+                raise
+            time.sleep(30)
+    raise Exception(f"Failed after {retries} retries: {url}")
 
 
 # ─────────────────────────────────────────
@@ -165,8 +178,6 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
         for i, msg in enumerate(thread):
             if msg["direction"] != "inbound":
                 continue
-            # Find first outbound in same thread after this inbound
-            # (any outbound counts — handles delegates, aliases, shared sending)
             reply = next(
                 (m for m in thread[i + 1:]
                  if m["direction"] == "outbound"),
