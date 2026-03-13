@@ -9,9 +9,35 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
-const TARGET_HOURS = 48;
+const INTERNAL_DOMAIN = "keystonebookkeepers.com";
+const PAGE_SIZE = 50;
+
+const AUTO_REPLY_PATTERNS = [
+  "automatic reply", "out of office", "undeliverable", "delivery failed",
+  "mail delivery", "noreply", "no-reply", "do not reply", "donotreply",
+  "mailer-daemon", "postmaster", "notification", "[govos]", "auto-reply",
+  "auto reply", "away from", "vacation reply",
+];
+
+function isAutoReply(subject = "", clientEmail = "") {
+  const s = subject.toLowerCase();
+  const e = clientEmail.toLowerCase();
+  return (
+    AUTO_REPLY_PATTERNS.some(p => s.includes(p)) ||
+    e.includes("noreply") ||
+    e.includes("no-reply") ||
+    e.includes("donotreply") ||
+    e.includes("notifications@") ||
+    e.includes("mailer-daemon")
+  );
+}
+
+function isInternal(clientEmail = "") {
+  return clientEmail.toLowerCase().includes(INTERNAL_DOMAIN);
+}
 
 function fmtDays(d) {
+  if (d === null || d === undefined) return "—";
   if (d < 1) return `${Math.round(d * 24)}h`;
   return `${d.toFixed(1)}d`;
 }
@@ -46,24 +72,52 @@ function CustomTooltip({ active, payload, label }) {
   );
 }
 
-export default function App() {
-  const [responses, setResponses]     = useState([]);
-  const [loading, setLoading]         = useState(true);
-  const [error, setError]             = useState(null);
-  const [lastSynced, setLastSynced]   = useState(null);
+function exportCSV(rows) {
+  const headers = ["Date", "Team Member", "Client Email", "Client Name", "Subject", "Response Time (Days)", "Within Target"];
+  const lines = [
+    headers.join(","),
+    ...rows.map(r => [
+      new Date(r.inbound_at).toLocaleDateString(),
+      r.team_member_name || r.team_member_email,
+      r.client_email || "",
+      r.client_name || "",
+      `"${(r.subject || "").replace(/"/g, '""')}"`,
+      r.response_days,
+      r.within_target ? "Yes" : "No",
+    ].join(",")),
+  ];
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `email-response-time-${new Date().toISOString().split("T")[0]}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
+export default function App() {
+  const [responses, setResponses]   = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState(null);
+  const [lastSynced, setLastSynced] = useState(null);
+  const [page, setPage]             = useState(1);
+
+  // Filters
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date(); d.setMonth(d.getMonth() - 3);
     return d.toISOString().split("T")[0];
   });
   const [dateTo, setDateTo]           = useState(() => new Date().toISOString().split("T")[0]);
   const [teamMember, setTeamMember]   = useState("All");
-  const [targetHours, setTargetHours] = useState(TARGET_HOURS);
+  const [targetHours, setTargetHours] = useState(48);
+  const [emailSource, setEmailSource] = useState("clients"); // "clients" | "all"
+  const [excludeAutoReply, setExcludeAutoReply] = useState(true);
 
   useEffect(() => {
     async function load() {
       setLoading(true);
       setError(null);
+      setPage(1);
       try {
         const { data, error: err } = await supabase
           .from("email_responses")
@@ -98,18 +152,20 @@ export default function App() {
   const filtered = useMemo(() => {
     return responses
       .filter(r => teamMember === "All" || r.team_member_name === teamMember || r.team_member_email === teamMember)
+      .filter(r => emailSource === "all" || !isInternal(r.client_email || ""))
+      .filter(r => !excludeAutoReply || !isAutoReply(r.subject, r.client_email))
       .map(r => ({ ...r, within_target: r.response_days <= targetHours / 24 }));
-  }, [responses, teamMember, targetHours]);
+  }, [responses, teamMember, targetHours, emailSource, excludeAutoReply]);
 
+  // KPIs
   const totalResponses = filtered.length;
   const withinTarget   = filtered.filter(r => r.within_target).length;
   const pctWithin      = totalResponses ? (withinTarget / totalResponses * 100).toFixed(1) : "0.0";
   const avgDays        = totalResponses
     ? filtered.reduce((s, r) => s + r.response_days, 0) / totalResponses : 0;
+  const totalEmails    = useMemo(() => new Set(filtered.map(r => r.inbound_message_id)).size, [filtered]);
 
-  const totalEmails = useMemo(() =>
-    new Set(filtered.map(r => r.inbound_message_id)).size, [filtered]);
-
+  // Chart
   const chartData = useMemo(() => {
     const counts = Object.fromEntries(BUCKET_ORDER.map(b => [b, 0]));
     filtered.forEach(r => { counts[bucketLabel(r.response_days)]++; });
@@ -119,8 +175,13 @@ export default function App() {
   const barColor = (label) =>
     label === "< 1 Day" || label === "1–2 Days" ? "#2563eb" : "#93c5fd";
 
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
   return (
     <div className="app">
+      {/* Header */}
       <header className="header">
         <div className="header-left">
           <div className="logo">KS</div>
@@ -138,106 +199,139 @@ export default function App() {
         </div>
       </header>
 
-      <div className="layout">
-        <aside className="sidebar">
-          <div className="filter-section">
-            <label className="filter-label">Date Range</label>
+      {/* Top filter bar */}
+      <div className="top-filters">
+        <div className="top-filter-group">
+          <label className="filter-label">Date Range</label>
+          <div className="date-range">
             <input type="date" className="filter-input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+            <span className="date-sep">→</span>
             <input type="date" className="filter-input" value={dateTo} onChange={e => setDateTo(e.target.value)} />
-            <p className="filter-note">Excludes weekend days</p>
           </div>
-          <div className="filter-section">
-            <label className="filter-label">Team Member</label>
-            <select className="filter-input" value={teamMember} onChange={e => setTeamMember(e.target.value)}>
-              {teamMembers.map(m => <option key={m}>{m}</option>)}
-            </select>
-          </div>
-          <div className="filter-section">
-            <label className="filter-label">Target Hours</label>
-            <input
-              type="number"
-              className="filter-input"
-              value={targetHours}
-              min={1} max={240}
-              onChange={e => setTargetHours(Number(e.target.value))}
-            />
-          </div>
-        </aside>
+        </div>
+        <div className="top-filter-group">
+          <label className="filter-label">Team Member</label>
+          <select className="filter-input" value={teamMember} onChange={e => setTeamMember(e.target.value)}>
+            {teamMembers.map(m => <option key={m}>{m}</option>)}
+          </select>
+        </div>
+        <div className="top-filter-group">
+          <label className="filter-label">Target Hours</label>
+          <input type="number" className="filter-input filter-input-sm" value={targetHours} min={1} max={240}
+            onChange={e => setTargetHours(Number(e.target.value))} />
+        </div>
+        <div className="top-filter-group">
+          <label className="filter-label">Include Emails From</label>
+          <select className="filter-input" value={emailSource} onChange={e => setEmailSource(e.target.value)}>
+            <option value="clients">Clients Only</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+        <div className="top-filter-group">
+          <label className="filter-label">Auto-Replies</label>
+          <select className="filter-input" value={excludeAutoReply ? "exclude" : "include"}
+            onChange={e => setExcludeAutoReply(e.target.value === "exclude")}>
+            <option value="exclude">Exclude</option>
+            <option value="include">Include</option>
+          </select>
+        </div>
+        <div className="top-filter-group top-filter-note">
+          <span className="filter-note">Excludes weekend days</span>
+        </div>
+      </div>
 
-        <main className="main">
-          {error && <div className="error-banner">Failed to load data: {error}</div>}
+      <div className="main">
+        {error && <div className="error-banner">Failed to load data: {error}</div>}
 
-          <div className="kpi-row">
-            <KpiCard label="Total Emails"              value={loading ? "—" : totalEmails.toLocaleString()} />
-            <KpiCard label="Total Responses"           value={loading ? "—" : totalResponses.toLocaleString()} />
-            <KpiCard label="Responses Within Target"   value={loading ? "—" : withinTarget.toLocaleString()} />
-            <KpiCard label="% Within Target"           value={loading ? "—" : `${pctWithin}%`} />
-            <KpiCard label="Avg Response Time"         value={loading ? "—" : fmtDays(avgDays)} sub="business days" />
-          </div>
+        {/* KPI Row */}
+        <div className="kpi-row">
+          <KpiCard label="Total Emails"            value={loading ? "—" : totalEmails.toLocaleString()} />
+          <KpiCard label="Total Responses"         value={loading ? "—" : totalResponses.toLocaleString()} />
+          <KpiCard label="Within Target"           value={loading ? "—" : withinTarget.toLocaleString()} />
+          <KpiCard label="% Within Target"         value={loading ? "—" : `${pctWithin}%`} />
+          <KpiCard label="Avg Response Time"       value={loading ? "—" : fmtDays(avgDays)} sub="business days" />
+        </div>
 
-          <div className="chart-card">
-            <h2 className="chart-title">Response Time Distribution</h2>
-            <p className="chart-sub">Count of email responses by business day bucket</p>
-            {loading ? (
-              <div className="chart-loading">Loading…</div>
-            ) : totalResponses === 0 ? (
-              <div className="chart-loading">No responses found for selected filters.</div>
-            ) : (
-              <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 13, fontFamily: "inherit" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: "#6b7280", fontSize: 12, fontFamily: "inherit" }} axisLine={false} tickLine={false} width={40} />
-                  <Tooltip content={<CustomTooltip />} cursor={{ fill: "#f3f4f6" }} />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={100}>
-                    {chartData.map(entry => (
-                      <Cell key={entry.label} fill={barColor(entry.label)} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+        {/* Chart */}
+        <div className="chart-card">
+          <h2 className="chart-title">Response Time Distribution</h2>
+          <p className="chart-sub">Count of email responses by business day bucket</p>
+          {loading ? (
+            <div className="chart-loading">Loading…</div>
+          ) : totalResponses === 0 ? (
+            <div className="chart-loading">No responses found for selected filters.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 13, fontFamily: "inherit" }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: "#6b7280", fontSize: 12, fontFamily: "inherit" }} axisLine={false} tickLine={false} width={40} />
+                <Tooltip content={<CustomTooltip />} cursor={{ fill: "#f3f4f6" }} />
+                <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={100}>
+                  {chartData.map(entry => (
+                    <Cell key={entry.label} fill={barColor(entry.label)} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
 
-          {!loading && filtered.length > 0 && (
-            <div className="table-card">
+        {/* Table */}
+        {!loading && filtered.length > 0 && (
+          <div className="table-card">
+            <div className="table-header">
               <h2 className="chart-title">Recent Responses</h2>
-              <div className="table-wrap">
-                <table className="resp-table">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Team Member</th>
-                      <th>Client</th>
-                      <th>Subject</th>
-                      <th>Response Time</th>
-                      <th>Within Target</th>
+              <button className="export-btn" onClick={() => exportCSV(filtered)}>
+                ↓ Export CSV
+              </button>
+            </div>
+            <div className="table-wrap">
+              <table className="resp-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Team Member</th>
+                    <th>Client</th>
+                    <th>Subject</th>
+                    <th>Response Time</th>
+                    <th>Within Target</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginated.map(r => (
+                    <tr key={r.id}>
+                      <td>{new Date(r.inbound_at).toLocaleDateString()}</td>
+                      <td>{r.team_member_name || r.team_member_email}</td>
+                      <td className="td-muted">{r.client_name || r.client_email || "—"}</td>
+                      <td className="td-subject">{r.subject || "—"}</td>
+                      <td className="td-mono">{fmtDays(r.response_days)}</td>
+                      <td>
+                        <span className={r.within_target ? "badge-green" : "badge-red"}>
+                          {r.within_target ? "✓" : "✗"}
+                        </span>
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.slice(0, 100).map(r => (
-                      <tr key={r.id}>
-                        <td>{new Date(r.inbound_at).toLocaleDateString()}</td>
-                        <td>{r.team_member_name || r.team_member_email}</td>
-                        <td className="td-muted">{r.client_name || r.client_email || "—"}</td>
-                        <td className="td-subject">{r.subject || "—"}</td>
-                        <td className="td-mono">{fmtDays(r.response_days)}</td>
-                        <td>
-                          <span className={r.within_target ? "badge-green" : "badge-red"}>
-                            {r.within_target ? "✓" : "✗"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filtered.length > 100 && (
-                  <p className="table-note">Showing 100 of {filtered.length.toLocaleString()} responses</p>
-                )}
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            <div className="pagination">
+              <span className="pagination-info">
+                Showing {((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length.toLocaleString()} responses
+              </span>
+              <div className="pagination-controls">
+                <button className="page-btn" onClick={() => setPage(1)} disabled={page === 1}>«</button>
+                <button className="page-btn" onClick={() => setPage(p => p - 1)} disabled={page === 1}>‹ Prev</button>
+                <span className="page-current">Page {page} of {totalPages}</span>
+                <button className="page-btn" onClick={() => setPage(p => p + 1)} disabled={page === totalPages}>Next ›</button>
+                <button className="page-btn" onClick={() => setPage(totalPages)} disabled={page === totalPages}>»</button>
               </div>
             </div>
-          )}
-        </main>
+          </div>
+        )}
       </div>
     </div>
   );
