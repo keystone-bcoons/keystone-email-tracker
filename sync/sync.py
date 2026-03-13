@@ -123,26 +123,26 @@ def get_all_users(token: str) -> list[dict]:
 
 
 def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[dict]:
+    """Fetch all messages across all folders (inbox, sent, archive, subfolders)."""
     messages = []
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    for folder in ["inbox", "sentItems"]:
-        url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/{folder}/messages"
-        params = {
-            "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
-            "$filter": f"receivedDateTime ge {since_str}",
-            "$top": PAGE_SIZE,
-            "$orderby": "receivedDateTime asc",
-        }
-        while url:
-            try:
-                data = graph_get(token, url, params)
-            except requests.HTTPError as e:
-                log.warning(f"Skipping {folder} for {user_id}: {e}")
-                break
-            messages.extend(data.get("value", []))
-            url = data.get("@odata.nextLink")
-            params = None
+    url = f"{GRAPH_BASE}/users/{user_id}/messages"
+    params = {
+        "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
+        "$filter": f"receivedDateTime ge {since_str}",
+        "$top": PAGE_SIZE,
+        "$orderby": "receivedDateTime asc",
+    }
+    while url:
+        try:
+            data = graph_get(token, url, params)
+        except requests.HTTPError as e:
+            log.warning(f"Skipping messages for {user_id}: {e}")
+            break
+        messages.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+        params = None
 
     return messages
 
