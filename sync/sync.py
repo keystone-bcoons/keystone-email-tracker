@@ -36,7 +36,7 @@ LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
-PAGE_SIZE      = 999
+PAGE_SIZE      = 50  # Small pages to avoid Microsoft 504 timeouts on large mailboxes
 
 
 # ─────────────────────────────────────────
