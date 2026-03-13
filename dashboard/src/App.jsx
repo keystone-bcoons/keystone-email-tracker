@@ -9,7 +9,11 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
-const INTERNAL_DOMAIN = "keystonebookkeepers.com";
+const EXCLUDED_DOMAINS = [
+  "keystonebookkeepers.com",
+  "topkey.io",
+];
+
 const PAGE_SIZE = 50;
 
 const AUTO_REPLY_PATTERNS = [
@@ -31,7 +35,8 @@ function isAutoReply(subject = "", clientEmail = "") {
 }
 
 function isInternal(clientEmail = "") {
-  return clientEmail.toLowerCase().includes(INTERNAL_DOMAIN);
+  const e = clientEmail.toLowerCase();
+  return EXCLUDED_DOMAINS.some(domain => e.includes(domain));
 }
 
 function fmtDays(d) {
@@ -145,7 +150,6 @@ export default function App() {
       setError(null);
       setPage(1);
       try {
-        // Paginate through all records — Supabase default limit is 1000
         let allData = [];
         let from = 0;
         const batchSize = 1000;
@@ -185,7 +189,6 @@ export default function App() {
     return ["All", ...names.sort()];
   }, [responses]);
 
-  // Top-filtered rows (drives KPIs + chart)
   const filtered = useMemo(() => {
     return responses
       .filter(r => teamMember === "All" || r.team_member_name === teamMember || r.team_member_email === teamMember)
@@ -194,7 +197,6 @@ export default function App() {
       .map(r => ({ ...r, within_target: r.response_days <= targetHours / 24 }));
   }, [responses, teamMember, targetHours, emailSource, excludeAutoReply]);
 
-  // Column-filtered + sorted rows (drives table)
   const tableRows = useMemo(() => {
     let rows = filtered
       .filter(r => !colClient  || (r.client_name || r.client_email || "").toLowerCase().includes(colClient.toLowerCase()))
@@ -216,14 +218,12 @@ export default function App() {
     return rows;
   }, [filtered, colClient, colSubject, colTarget, sortCol, sortDir]);
 
-  // KPIs
   const totalResponses = filtered.length;
   const withinTarget   = filtered.filter(r => r.within_target).length;
   const pctWithin      = totalResponses ? (withinTarget / totalResponses * 100).toFixed(1) : "0.0";
   const avgDays        = totalResponses ? filtered.reduce((s, r) => s + r.response_days, 0) / totalResponses : 0;
   const totalEmails    = useMemo(() => new Set(filtered.map(r => r.inbound_message_id)).size, [filtered]);
 
-  // Chart
   const chartData = useMemo(() => {
     const counts = Object.fromEntries(BUCKET_ORDER.map(b => [b, 0]));
     filtered.forEach(r => { counts[bucketLabel(r.response_days)]++; });
@@ -233,15 +233,12 @@ export default function App() {
   const barColor = label =>
     label === "< 1 Day" || label === "1–2 Days" ? "#2563eb" : "#93c5fd";
 
-  // Pagination
   const totalPages = Math.max(1, Math.ceil(tableRows.length / PAGE_SIZE));
   const paginated  = tableRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
   const hasColFilters = colClient || colSubject || colTarget !== "all";
 
   return (
     <div className="app">
-      {/* Header */}
       <header className="header">
         <div className="header-left">
           <div className="logo">KS</div>
@@ -259,7 +256,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Top filter bar */}
       <div className="top-filters">
         <div className="top-filter-group">
           <label className="filter-label">Date Range</label>
@@ -303,7 +299,6 @@ export default function App() {
       <div className="main">
         {error && <div className="error-banner">Failed to load data: {error}</div>}
 
-        {/* KPI Row */}
         <div className="kpi-row">
           <KpiCard label="Total Emails"      value={loading ? "—" : totalEmails.toLocaleString()} />
           <KpiCard label="Total Responses"   value={loading ? "—" : totalResponses.toLocaleString()} />
@@ -312,7 +307,6 @@ export default function App() {
           <KpiCard label="Avg Response Time" value={loading ? loadingMsg : fmtDays(avgDays)} sub={loading ? "" : "business hours"} />
         </div>
 
-        {/* Chart */}
         <div className="chart-card">
           <h2 className="chart-title">Response Time Distribution</h2>
           <p className="chart-sub">Count of email responses by business day bucket</p>
@@ -337,7 +331,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Table */}
         {!loading && filtered.length > 0 && (
           <div className="table-card">
             <div className="table-header">
@@ -420,7 +413,6 @@ export default function App() {
               </table>
             </div>
 
-            {/* Pagination */}
             <div className="pagination">
               <span className="pagination-info">
                 Showing {tableRows.length === 0 ? 0 : ((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, tableRows.length)} of {tableRows.length.toLocaleString()} responses
