@@ -36,7 +36,55 @@ LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
-PAGE_SIZE      = 50  # Small pages to avoid Microsoft 504 timeouts on large mailboxes
+PAGE_SIZE      = 50
+
+# Sender domains to exclude — notifications, platforms, internal
+EXCLUDED_SENDER_DOMAINS = [
+    # Internal
+    "keystonebookkeepers.com",
+    # Property management platforms
+    "ownerrez.com",
+    "breezeway.io",
+    "turno.com",
+    "topkey.io",
+    "guesty.com",
+    "hostaway.com",
+    "lodgify.com",
+    # Booking platforms
+    "airbnb.com",
+    "vrbo.com",
+    "booking.com",
+    "expedia.com",
+    # Accounting / payroll / banking
+    "intuit.com",
+    "qbo.intuit.com",
+    "bankofamerica.com",
+    "relay.fi",
+    # Misc notifications
+    "amazon.com",
+    "hilton.com",
+    "notification.circle.so",
+    "govos.com",
+]
+
+# Subject patterns to exclude
+EXCLUDED_SUBJECT_PATTERNS = [
+    "automatic reply", "out of office", "undeliverable", "delivery failed",
+    "mail delivery", "noreply", "no-reply", "do not reply", "donotreply",
+    "mailer-daemon", "postmaster", "[govos]", "auto-reply", "auto reply",
+    "away from", "vacation reply",
+]
+
+def should_exclude(from_email: str, subject: str) -> bool:
+    e = from_email.lower()
+    s = (subject or "").lower()
+    if any(domain in e for domain in EXCLUDED_SENDER_DOMAINS):
+        return True
+    if any(pattern in s for pattern in EXCLUDED_SUBJECT_PATTERNS):
+        return True
+    if any(x in e for x in ["noreply", "no-reply", "donotreply", "notifications@", "mailer-daemon", "alerts@"]):
+        return True
+    return False
 
 
 # ─────────────────────────────────────────
@@ -77,7 +125,6 @@ def graph_get(token: str, url: str, params: dict = None, retries: int = 3) -> di
 # Helpers
 # ─────────────────────────────────────────
 def business_days_between(start: datetime, end: datetime) -> float:
-    """Calculate working days (Mon–Fri) between two datetimes."""
     if end <= start:
         return 0.0
     total_seconds = 0.0
@@ -136,10 +183,8 @@ def get_all_users(token: str) -> list[dict]:
 
 
 def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[dict]:
-    """Fetch all messages across all folders (inbox, sent, archive, subfolders)."""
     messages = []
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-
     url = f"{GRAPH_BASE}/users/{user_id}/messages"
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
@@ -156,7 +201,6 @@ def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[d
         messages.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
         params = None
-
     return messages
 
 
@@ -174,21 +218,17 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
     responses = []
     for conv_id, thread in by_conv.items():
         thread.sort(key=lambda x: x["received_at"])
-
         for i, msg in enumerate(thread):
             if msg["direction"] != "inbound":
                 continue
             reply = next(
-                (m for m in thread[i + 1:]
-                 if m["direction"] == "outbound"),
+                (m for m in thread[i + 1:] if m["direction"] == "outbound"),
                 None,
             )
             if not reply:
                 continue
-
             resp_days = business_days_between(msg["received_at"], reply["received_at"])
             within_target = resp_days <= (TARGET_HOURS / 24)
-
             responses.append({
                 "inbound_message_id": msg["id"],
                 "reply_message_id":   reply["id"],
@@ -203,7 +243,6 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
                 "within_target":      within_target,
                 "target_hours":       TARGET_HOURS,
             })
-
     return responses
 
 
@@ -264,10 +303,18 @@ def main():
 
         message_records = []
         normalized = []
+        skipped = 0
         for m in raw_messages:
             from_email, from_name = extract_email(m.get("from", {}))
+            subject = (m.get("subject") or "")
             is_outbound = from_email == email
-            direction   = "outbound" if is_outbound else "inbound"
+
+            # For inbound messages, check if sender should be excluded
+            if not is_outbound and should_exclude(from_email, subject):
+                skipped += 1
+                continue
+
+            direction = "outbound" if is_outbound else "inbound"
             client_email, client_name = "", ""
             if is_outbound:
                 recipients = m.get("toRecipients", [])
@@ -287,7 +334,7 @@ def main():
                 "team_member_name":    name,
                 "client_email":        client_email,
                 "client_name":         client_name,
-                "subject":             (m.get("subject") or "")[:500],
+                "subject":             subject[:500],
                 "received_at":         received_at.isoformat(),
                 "direction":           direction,
                 "conversation_id":     m.get("conversationId", ""),
@@ -296,6 +343,7 @@ def main():
             message_records.append(rec)
             normalized.append({**rec, "received_at": received_at})
 
+        log.info(f"  Skipped {skipped} notification/excluded messages")
         upsert_messages(sb, message_records)
         log.info(f"  Upserted {len(message_records)} messages")
 
