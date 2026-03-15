@@ -38,54 +38,6 @@ GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
 PAGE_SIZE      = 50
 
-# Sender domains to exclude — notifications, platforms, internal
-EXCLUDED_SENDER_DOMAINS = [
-    # Internal
-    "keystonebookkeepers.com",
-    # Property management platforms
-    "ownerrez.com",
-    "breezeway.io",
-    "turno.com",
-    "topkey.io",
-    "guesty.com",
-    "hostaway.com",
-    "lodgify.com",
-    # Booking platforms
-    "airbnb.com",
-    "vrbo.com",
-    "booking.com",
-    "expedia.com",
-    # Accounting / payroll / banking
-    "intuit.com",
-    "qbo.intuit.com",
-    "bankofamerica.com",
-    "relay.fi",
-    # Misc notifications
-    "amazon.com",
-    "hilton.com",
-    "notification.circle.so",
-    "govos.com",
-]
-
-# Subject patterns to exclude
-EXCLUDED_SUBJECT_PATTERNS = [
-    "automatic reply", "out of office", "undeliverable", "delivery failed",
-    "mail delivery", "noreply", "no-reply", "do not reply", "donotreply",
-    "mailer-daemon", "postmaster", "[govos]", "auto-reply", "auto reply",
-    "away from", "vacation reply",
-]
-
-def should_exclude(from_email: str, subject: str) -> bool:
-    e = from_email.lower()
-    s = (subject or "").lower()
-    if any(domain in e for domain in EXCLUDED_SENDER_DOMAINS):
-        return True
-    if any(pattern in s for pattern in EXCLUDED_SUBJECT_PATTERNS):
-        return True
-    if any(x in e for x in ["noreply", "no-reply", "donotreply", "notifications@", "mailer-daemon", "alerts@"]):
-        return True
-    return False
-
 
 # ─────────────────────────────────────────
 # Auth
@@ -303,18 +255,10 @@ def main():
 
         message_records = []
         normalized = []
-        skipped = 0
         for m in raw_messages:
             from_email, from_name = extract_email(m.get("from", {}))
-            subject = (m.get("subject") or "")
             is_outbound = from_email == email
-
-            # For inbound messages, check if sender should be excluded
-            if not is_outbound and should_exclude(from_email, subject):
-                skipped += 1
-                continue
-
-            direction = "outbound" if is_outbound else "inbound"
+            direction   = "outbound" if is_outbound else "inbound"
             client_email, client_name = "", ""
             if is_outbound:
                 recipients = m.get("toRecipients", [])
@@ -334,7 +278,7 @@ def main():
                 "team_member_name":    name,
                 "client_email":        client_email,
                 "client_name":         client_name,
-                "subject":             subject[:500],
+                "subject":             (m.get("subject") or "")[:500],
                 "received_at":         received_at.isoformat(),
                 "direction":           direction,
                 "conversation_id":     m.get("conversationId", ""),
@@ -343,7 +287,6 @@ def main():
             message_records.append(rec)
             normalized.append({**rec, "received_at": received_at})
 
-        log.info(f"  Skipped {skipped} notification/excluded messages")
         upsert_messages(sb, message_records)
         log.info(f"  Upserted {len(message_records)} messages")
 
