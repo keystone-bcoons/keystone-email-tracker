@@ -147,8 +147,8 @@ def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[d
     while url:
         try:
             data = graph_get(token, url, params)
-        except requests.HTTPError as e:
-            log.warning(f"Skipping messages for {user_id}: {e}")
+        except Exception as e:
+            log.warning(f"Skipping remaining messages for {user_id}: {e}")
             break
         messages.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
