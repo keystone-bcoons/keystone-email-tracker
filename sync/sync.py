@@ -14,6 +14,7 @@ Required environment variables:
 
 import os
 import logging
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -37,6 +38,89 @@ LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
 PAGE_SIZE      = 50
+
+# ─────────────────────────────────────────
+# Automated sender filtering
+# ─────────────────────────────────────────
+# Local-part prefixes that indicate automated/system senders
+AUTOMATED_PREFIXES = {
+    "noreply",
+    "no-reply",
+    "no_reply",
+    "donotreply",
+    "do-not-reply",
+    "do_not_reply",
+    "notifications",
+    "notification",
+    "alerts",
+    "alert",
+    "automated",
+    "automailer",
+    "auto",
+    "mailer",
+    "mailer-daemon",
+    "mailerdaemon",
+    "bounce",
+    "bounces",
+    "info",
+    "support",
+    "noreply+",
+}
+
+# Domains that are known automated/system senders
+AUTOMATED_DOMAINS = {
+    "breezeway.io",
+    "turno.com",
+    "ownerrez.com",
+    "hostaway.com",
+    "guesty.com",
+    "lodgify.com",
+    "vacasa.com",
+    "vrbo.com",
+    "airbnb.com",
+    "booking.com",
+    "tripadvisor.com",
+    "homeaway.com",
+    # Generic automation platforms
+    "sendgrid.net",
+    "mailchimp.com",
+    "mandrillapp.com",
+    "amazonses.com",
+    "bounce.stripe.com",
+    "em.stripe.com",
+}
+
+# Regex for catching common automated patterns not covered by exact prefix matching
+_AUTOMATED_RE = re.compile(
+    r"^(noreply|no[_\-]?reply|donotreply|do[_\-]?not[_\-]?reply|"
+    r"notification[s]?|alert[s]?|automated?|auto|mailer|bounce[s]?|"
+    r"postmaster|daemon|system|robot|bot)[+\-_.]?",
+    re.IGNORECASE,
+)
+
+
+def is_automated_sender(email: str) -> bool:
+    """Return True if the email address looks like an automated/system sender."""
+    if not email:
+        return False
+    email = email.strip().lower()
+    if "@" not in email:
+        return False
+    local, domain = email.split("@", 1)
+
+    # Domain-based block
+    if domain in AUTOMATED_DOMAINS:
+        return True
+
+    # Exact prefix match
+    if local in AUTOMATED_PREFIXES:
+        return True
+
+    # Regex match on local part
+    if _AUTOMATED_RE.match(local):
+        return True
+
+    return False
 
 
 # ─────────────────────────────────────────
@@ -134,10 +218,11 @@ def get_all_users(token: str) -> list[dict]:
     return users
 
 
-def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[dict]:
+def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
+    """Fetch messages from the inbox (received), filtered by receivedDateTime."""
     messages = []
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{GRAPH_BASE}/users/{user_id}/messages"
+    url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/Inbox/messages"
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
         "$filter": f"receivedDateTime ge {since_str}",
@@ -148,12 +233,51 @@ def fetch_messages_for_user(token: str, user_id: str, since: datetime) -> list[d
         try:
             data = graph_get(token, url, params)
         except Exception as e:
-            log.warning(f"Skipping remaining messages for {user_id}: {e}")
+            log.warning(f"Skipping remaining inbox messages for {user_id}: {e}")
             break
         messages.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
         params = None
     return messages
+
+
+def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]:
+    """Fetch messages from the Sent Items folder, filtered by sentDateTime."""
+    messages = []
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/SentItems/messages"
+    params = {
+        "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
+        "$filter": f"sentDateTime ge {since_str}",
+        "$top": PAGE_SIZE,
+        "$orderby": "sentDateTime asc",
+    }
+    while url:
+        try:
+            data = graph_get(token, url, params)
+        except Exception as e:
+            log.warning(f"Skipping remaining sent messages for {user_id}: {e}")
+            break
+        messages.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+        params = None
+    return messages
+
+
+def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
+    """
+    Merge inbox and sent messages, deduplicating by Graph message ID.
+    Graph message IDs are unique within a mailbox, so no cross-folder
+    duplicates are expected — but this guards against any overlap.
+    """
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for m in inbox + sent:
+        mid = m.get("id", "")
+        if mid and mid not in seen:
+            seen.add(mid)
+            merged.append(m)
+    return merged
 
 
 # ─────────────────────────────────────────
@@ -250,25 +374,51 @@ def main():
         since = get_last_synced(sb, email)
         log.info(f"  Fetching messages since {since.date()}")
 
-        raw_messages = fetch_messages_for_user(token, user["id"], since)
-        log.info(f"  Fetched {len(raw_messages)} raw messages")
+        # Fetch inbox (receivedDateTime) and sent items (sentDateTime) separately,
+        # then merge and deduplicate by Graph message ID.
+        inbox_messages = fetch_inbox_messages(token, user["id"], since)
+        sent_messages  = fetch_sent_messages(token, user["id"], since)
+        log.info(f"  Fetched {len(inbox_messages)} inbox + {len(sent_messages)} sent messages")
+
+        raw_messages = merge_and_deduplicate(inbox_messages, sent_messages)
+        log.info(f"  {len(raw_messages)} messages after deduplication")
 
         message_records = []
         normalized = []
+        skipped_automated = 0
+
         for m in raw_messages:
             from_email, from_name = extract_email(m.get("from", {}))
             is_outbound = from_email == email
             direction   = "outbound" if is_outbound else "inbound"
+
+            # For inbound messages, skip automated/system senders entirely.
+            # Outbound messages from the team member are always kept.
+            if not is_outbound and is_automated_sender(from_email):
+                skipped_automated += 1
+                continue
+
             client_email, client_name = "", ""
             if is_outbound:
                 recipients = m.get("toRecipients", [])
                 if recipients:
                     client_email, client_name = extract_email(recipients[0])
+                # Also skip outbound emails sent TO automated/system addresses
+                # (e.g. replies to notification threads that go back to a no-reply)
+                if is_automated_sender(client_email):
+                    skipped_automated += 1
+                    continue
             else:
                 client_email = from_email
                 client_name  = from_name
 
-            received_at = parse_dt(m.get("receivedDateTime") or m.get("sentDateTime"))
+            # Use sentDateTime for outbound, receivedDateTime for inbound.
+            # Fall back to whichever field is available.
+            if is_outbound:
+                received_at = parse_dt(m.get("sentDateTime") or m.get("receivedDateTime"))
+            else:
+                received_at = parse_dt(m.get("receivedDateTime") or m.get("sentDateTime"))
+
             if not received_at:
                 continue
 
@@ -287,6 +437,7 @@ def main():
             message_records.append(rec)
             normalized.append({**rec, "received_at": received_at})
 
+        log.info(f"  Skipped {skipped_automated} automated-sender messages")
         upsert_messages(sb, message_records)
         log.info(f"  Upserted {len(message_records)} messages")
 
