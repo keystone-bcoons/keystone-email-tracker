@@ -39,7 +39,7 @@ SYNC_USER_EMAIL = os.environ.get("SYNC_USER_EMAIL", "").strip().lower()
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
-PAGE_SIZE      = 999
+PAGE_SIZE      = 50
 
 # ─────────────────────────────────────────
 # Automated sender filtering
@@ -220,19 +220,21 @@ def get_all_users(token: str) -> list[dict]:
     return users
 
 
-def _fetch_folder(token: str, user_id: str, folder: str, filter_expr: str) -> list[dict]:
+def _fetch_folder(token: str, user_id: str, folder: str, since: datetime) -> list[dict]:
     """
-    Generic helper: page through a single well-known mail folder and return
-    all messages matching filter_expr.  Targeted folder queries are much
-    faster than querying all folders at once and avoid Graph 504 timeouts.
+    Page through a single mail folder and return messages received/sent on or
+    after `since`.  We do NOT pass a server-side $filter because date filters
+    on large folders trigger Graph 504 gateway timeouts even on the first page.
+    Instead we paginate until we hit a message older than `since` and stop,
+    filtering by date client-side.  PAGE_SIZE=50 keeps each request tiny so
+    it never times out.
     """
     messages = []
     url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/{folder}/messages"
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
-        "$filter": filter_expr,
         "$top": PAGE_SIZE,
-        # No $orderby — avoids forcing a full server-side sort which causes 504s.
+        "$orderby": "receivedDateTime desc",  # newest first so we can stop early
     }
     while url:
         try:
@@ -240,7 +242,18 @@ def _fetch_folder(token: str, user_id: str, folder: str, filter_expr: str) -> li
         except Exception as e:
             log.warning(f"Skipping remaining {folder} messages for {user_id}: {e}")
             break
-        messages.extend(data.get("value", []))
+        page = data.get("value", [])
+        done = False
+        for m in page:
+            # Use whichever date field is populated
+            dt_str = m.get("receivedDateTime") or m.get("sentDateTime") or ""
+            dt = parse_dt(dt_str)
+            if dt and dt < since:
+                done = True  # Rest of pages will be even older — stop here
+                break
+            messages.append(m)
+        if done:
+            break
         url = data.get("@odata.nextLink")
         params = None
     return messages
@@ -248,23 +261,17 @@ def _fetch_folder(token: str, user_id: str, folder: str, filter_expr: str) -> li
 
 def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
     """Fetch from Inbox — emails not yet cleared by Karbon."""
-    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return _fetch_folder(token, user_id, "Inbox", f"receivedDateTime ge {since_str}")
+    return _fetch_folder(token, user_id, "Inbox", since)
 
 
 def fetch_archive_messages(token: str, user_id: str, since: datetime) -> list[dict]:
-    """
-    Fetch from Archive — where Karbon moves all 'cleared' emails.
-    This is the primary source of historical inbound messages.
-    """
-    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return _fetch_folder(token, user_id, "Archive", f"receivedDateTime ge {since_str}")
+    """Fetch from Archive — where Karbon moves all cleared emails."""
+    return _fetch_folder(token, user_id, "Archive", since)
 
 
 def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]:
-    """Fetch from SentItems, filtered by sentDateTime."""
-    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return _fetch_folder(token, user_id, "SentItems", f"sentDateTime ge {since_str}")
+    """Fetch from SentItems."""
+    return _fetch_folder(token, user_id, "SentItems", since)
 
 
 def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
