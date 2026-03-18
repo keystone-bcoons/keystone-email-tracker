@@ -117,6 +117,7 @@ export default function App() {
   const [lastSynced, setLastSynced] = useState(null);
   const [page, setPage]             = useState(1);
   const [inboundCount, setInboundCount] = useState(null);
+  const [allTeamMembers, setAllTeamMembers] = useState(["All"]);
 
   // Top filters
   const [dateFrom, setDateFrom] = useState(() => {
@@ -185,8 +186,37 @@ export default function App() {
     load();
   }, [dateFrom, dateTo]);
 
+  // Load all team members from email_messages so the dropdown shows everyone,
+  // not just the subset who have matched response pairs in email_responses.
+  useEffect(() => {
+    async function loadAllTeamMembers() {
+      // Fetch a large batch of messages just for team_member_name.
+      // With 45 employees sending messages every day, 5000 rows will always
+      // contain all team members, and the payload is tiny (one string field).
+      const { data } = await supabase
+        .from("email_messages")
+        .select("team_member_name, team_member_email")
+        .order("received_at", { ascending: false })
+        .limit(5000);
+      if (data) {
+        const seen = new Set();
+        const names = [];
+        for (const row of data) {
+          const key = row.team_member_name || row.team_member_email || "";
+          if (key && !seen.has(key)) {
+            seen.add(key);
+            names.push(key);
+          }
+        }
+        setAllTeamMembers(["All", ...names.sort()]);
+      }
+    }
+    loadAllTeamMembers();
+  }, []);
+
   // Separately fetch true inbound email count from email_messages table.
   // This is the real "Total Emails" — not just the subset that have a matched response.
+  // Respects the same "Clients Only" filter as the response table so the numbers align.
   useEffect(() => {
     async function loadInboundCount() {
       setInboundCount(null);
@@ -199,21 +229,25 @@ export default function App() {
       if (teamMember !== "All") {
         q = q.eq("team_member_name", teamMember);
       }
+      // Mirror the "Include Emails From" filter: exclude internal domains when set to clients.
+      if (emailSource === "clients") {
+        for (const domain of EXCLUDED_DOMAINS) {
+          q = q.not("client_email", "ilike", `%${domain}%`);
+        }
+      }
       const { count, error: countErr } = await q;
       if (countErr) {
         console.error("inboundCount query error:", countErr);
       } else {
-        console.log("inboundCount result:", count, "| member:", teamMember, "| from:", dateFrom, "| to:", dateTo);
+        console.log("inboundCount result:", count, "| member:", teamMember, "| source:", emailSource, "| from:", dateFrom, "| to:", dateTo);
       }
       setInboundCount(count);
     }
     loadInboundCount();
-  }, [dateFrom, dateTo, teamMember]);
+  }, [dateFrom, dateTo, teamMember, emailSource]);
 
-  const teamMembers = useMemo(() => {
-    const names = [...new Set(responses.map(r => r.team_member_name || r.team_member_email))];
-    return ["All", ...names.sort()];
-  }, [responses]);
+  // teamMembers now comes from allTeamMembers state (loaded directly from email_messages),
+  // so it includes everyone — not just the subset who appear in email_responses.
 
   const filtered = useMemo(() => {
     return responses
@@ -295,7 +329,7 @@ export default function App() {
         <div className="top-filter-group">
           <label className="filter-label">Team Member</label>
           <select className="filter-input" value={teamMember} onChange={e => { setTeamMember(e.target.value); setPage(1); }}>
-            {teamMembers.map(m => <option key={m}>{m}</option>)}
+            {allTeamMembers.map(m => <option key={m}>{m}</option>)}
           </select>
         </div>
         <div className="top-filter-group">
