@@ -37,15 +37,12 @@ LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
-PAGE_SIZE      = 999  # Graph API max for messages; reduces round-trips ~20x vs PAGE_SIZE=50
+PAGE_SIZE      = 999
 
 # ─────────────────────────────────────────
 # Automated sender filtering
 # ─────────────────────────────────────────
-# Local-part prefixes that indicate automated/system senders.
-# Keep this list narrow — only unambiguously robotic addresses.
-# Do NOT include "info", "support", "auto" etc. — those are commonly used
-# by real humans at small businesses and would cause false-positive filtering.
+# Local-part prefixes that indicate automated/system senders
 AUTOMATED_PREFIXES = {
     "noreply",
     "no-reply",
@@ -57,11 +54,17 @@ AUTOMATED_PREFIXES = {
     "notification",
     "alerts",
     "alert",
+    "automated",
+    "automailer",
+    "auto",
+    "mailer",
     "mailer-daemon",
     "mailerdaemon",
     "bounce",
     "bounces",
-    "postmaster",
+    "info",
+    "support",
+    "noreply+",
 }
 
 # Domains that are known automated/system senders
@@ -87,12 +90,11 @@ AUTOMATED_DOMAINS = {
     "em.stripe.com",
 }
 
-# Regex for catching common automated patterns not covered by exact prefix matching.
-# Intentionally conservative — only matches patterns that are unambiguously robotic.
+# Regex for catching common automated patterns not covered by exact prefix matching
 _AUTOMATED_RE = re.compile(
     r"^(noreply|no[_\-]?reply|donotreply|do[_\-]?not[_\-]?reply|"
-    r"notification[s]?|alert[s]?|mailer\-?daemon|bounce[s]?|"
-    r"postmaster|daemon)[+\-_.]?",
+    r"notification[s]?|alert[s]?|automated?|auto|mailer|bounce[s]?|"
+    r"postmaster|daemon|system|robot|bot)[+\-_.]?",
     re.IGNORECASE,
 )
 
@@ -217,10 +219,11 @@ def get_all_users(token: str) -> list[dict]:
 
 
 def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
-    """Fetch all received messages across ALL folders (Inbox, Archive, subfolders, etc.),
-    filtered by receivedDateTime. Using /messages instead of /mailFolders/Inbox/messages
-    is critical because Karbon moves cleared emails to Archive — the Inbox itself is nearly
-    empty while Archive holds the bulk of historical mail."""
+    """
+    Fetch received messages across ALL folders (not just Inbox).
+    Karbon moves cleared emails to Archive, so Inbox-only would miss the vast
+    majority of messages.  /users/{id}/messages covers every folder.
+    """
     messages = []
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     url = f"{GRAPH_BASE}/users/{user_id}/messages"
@@ -234,7 +237,7 @@ def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict
         try:
             data = graph_get(token, url, params)
         except Exception as e:
-            log.warning(f"Skipping remaining inbox messages for {user_id}: {e}")
+            log.warning(f"Skipping remaining messages for {user_id}: {e}")
             break
         messages.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
@@ -284,9 +287,35 @@ def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────
 # Response time calculation
 # ─────────────────────────────────────────
-def calculate_responses(messages: list[dict], team_email: str, team_name: str) -> list[dict]:
+def calculate_responses_from_db(sb: Client, team_email: str, team_name: str, since: datetime) -> list[dict]:
+    """
+    Match inbound → outbound pairs by querying the DB for ALL messages stored
+    for this team member since `since`.  This is more correct than matching
+    only within the current fetch batch because:
+      - A client email and the reply may arrive in different sync runs.
+      - After a full re-fetch we want to recalculate all pairs cleanly.
+    """
+    all_msgs = []
+    offset = 0
+    batch_size = 1000
+    while True:
+        result = (
+            sb.table("email_messages")
+            .select("id,direction,conversation_id,client_email,client_name,subject,received_at")
+            .eq("team_member_email", team_email)
+            .gte("received_at", since.isoformat())
+            .order("received_at", desc=False)
+            .range(offset, offset + batch_size - 1)
+            .execute()
+        )
+        batch = result.data or []
+        all_msgs.extend(batch)
+        if len(batch) < batch_size:
+            break
+        offset += batch_size
+
     by_conv: dict[str, list[dict]] = {}
-    for m in messages:
+    for m in all_msgs:
         cid = m.get("conversation_id", "")
         if not cid:
             continue
@@ -304,7 +333,11 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
             )
             if not reply:
                 continue
-            resp_days = business_days_between(msg["received_at"], reply["received_at"])
+            inbound_at = parse_dt(msg["received_at"])
+            replied_at = parse_dt(reply["received_at"])
+            if not inbound_at or not replied_at:
+                continue
+            resp_days = business_days_between(inbound_at, replied_at)
             within_target = resp_days <= (TARGET_HOURS / 24)
             responses.append({
                 "inbound_message_id": msg["id"],
@@ -314,8 +347,8 @@ def calculate_responses(messages: list[dict], team_email: str, team_name: str) -
                 "client_email":       msg.get("client_email", ""),
                 "client_name":        msg.get("client_name", ""),
                 "subject":            (msg.get("subject") or ""),
-                "inbound_at":         msg["received_at"].isoformat(),
-                "replied_at":         reply["received_at"].isoformat(),
+                "inbound_at":         msg["received_at"],
+                "replied_at":         reply["received_at"],
                 "response_days":      round(resp_days, 4),
                 "within_target":      within_target,
                 "target_hours":       TARGET_HOURS,
@@ -385,7 +418,6 @@ def main():
         log.info(f"  {len(raw_messages)} messages after deduplication")
 
         message_records = []
-        normalized = []
         skipped_automated = 0
 
         for m in raw_messages:
@@ -436,13 +468,15 @@ def main():
                 "internet_message_id": m.get("internetMessageId", ""),
             }
             message_records.append(rec)
-            normalized.append({**rec, "received_at": received_at})
 
         log.info(f"  Skipped {skipped_automated} automated-sender messages")
         upsert_messages(sb, message_records)
         log.info(f"  Upserted {len(message_records)} messages")
 
-        responses = calculate_responses(normalized, email, name)
+        # Match responses from the full DB record for this user (not just this batch).
+        # This handles the case where the inbound email and the reply were fetched
+        # in separate sync runs (e.g. daily incremental syncs).
+        responses = calculate_responses_from_db(sb, email, name, since)
         upsert_responses(sb, responses)
         log.info(f"  Upserted {len(responses)} response records")
 
