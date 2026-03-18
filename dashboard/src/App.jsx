@@ -199,7 +199,12 @@ export default function App() {
       if (teamMember !== "All") {
         q = q.eq("team_member_name", teamMember);
       }
-      const { count } = await q;
+      const { count, error: countErr } = await q;
+      if (countErr) {
+        console.error("inboundCount query error:", countErr);
+      } else {
+        console.log("inboundCount result:", count, "| member:", teamMember, "| from:", dateFrom, "| to:", dateTo);
+      }
       setInboundCount(count);
     }
     loadInboundCount();
