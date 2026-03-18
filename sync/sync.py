@@ -220,56 +220,51 @@ def get_all_users(token: str) -> list[dict]:
     return users
 
 
-def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
+def _fetch_folder(token: str, user_id: str, folder: str, filter_expr: str) -> list[dict]:
     """
-    Fetch received messages across ALL folders (not just Inbox).
-    Karbon moves cleared emails to Archive, so Inbox-only would miss the vast
-    majority of messages.  /users/{id}/messages covers every folder.
+    Generic helper: page through a single well-known mail folder and return
+    all messages matching filter_expr.  Targeted folder queries are much
+    faster than querying all folders at once and avoid Graph 504 timeouts.
     """
     messages = []
-    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{GRAPH_BASE}/users/{user_id}/messages"
+    url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/{folder}/messages"
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
-        "$filter": f"receivedDateTime ge {since_str} and isDraft eq false",
+        "$filter": filter_expr,
         "$top": PAGE_SIZE,
-        # No $orderby — sorting forces Graph to scan & sort the full result set
-        # before returning page 1, which causes 504s on large mailboxes.
-        # We sort in-memory after fetching.
+        # No $orderby — avoids forcing a full server-side sort which causes 504s.
     }
     while url:
         try:
             data = graph_get(token, url, params)
         except Exception as e:
-            log.warning(f"Skipping remaining messages for {user_id}: {e}")
+            log.warning(f"Skipping remaining {folder} messages for {user_id}: {e}")
             break
         messages.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
         params = None
     return messages
+
+
+def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
+    """Fetch from Inbox — emails not yet cleared by Karbon."""
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _fetch_folder(token, user_id, "Inbox", f"receivedDateTime ge {since_str}")
+
+
+def fetch_archive_messages(token: str, user_id: str, since: datetime) -> list[dict]:
+    """
+    Fetch from Archive — where Karbon moves all 'cleared' emails.
+    This is the primary source of historical inbound messages.
+    """
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _fetch_folder(token, user_id, "Archive", f"receivedDateTime ge {since_str}")
 
 
 def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]:
-    """Fetch messages from the Sent Items folder, filtered by sentDateTime."""
-    messages = []
+    """Fetch from SentItems, filtered by sentDateTime."""
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/SentItems/messages"
-    params = {
-        "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
-        "$filter": f"sentDateTime ge {since_str}",
-        "$top": PAGE_SIZE,
-        # No $orderby — same reason as fetch_inbox_messages above.
-    }
-    while url:
-        try:
-            data = graph_get(token, url, params)
-        except Exception as e:
-            log.warning(f"Skipping remaining sent messages for {user_id}: {e}")
-            break
-        messages.extend(data.get("value", []))
-        url = data.get("@odata.nextLink")
-        params = None
-    return messages
+    return _fetch_folder(token, user_id, "SentItems", f"sentDateTime ge {since_str}")
 
 
 def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
@@ -420,13 +415,15 @@ def main():
         since = get_last_synced(sb, email)
         log.info(f"  Fetching messages since {since.date()}")
 
-        # Fetch inbox (receivedDateTime) and sent items (sentDateTime) separately,
-        # then merge and deduplicate by Graph message ID.
-        inbox_messages = fetch_inbox_messages(token, user["id"], since)
-        sent_messages  = fetch_sent_messages(token, user["id"], since)
-        log.info(f"  Fetched {len(inbox_messages)} inbox + {len(sent_messages)} sent messages")
+        # Fetch from Inbox, Archive (where Karbon moves cleared emails), and SentItems.
+        # Targeted folder queries avoid the Graph 504 timeouts that occur when
+        # querying /users/{id}/messages across all folders at once.
+        inbox_messages   = fetch_inbox_messages(token, user["id"], since)
+        archive_messages = fetch_archive_messages(token, user["id"], since)
+        sent_messages    = fetch_sent_messages(token, user["id"], since)
+        log.info(f"  Fetched {len(inbox_messages)} inbox + {len(archive_messages)} archive + {len(sent_messages)} sent")
 
-        raw_messages = merge_and_deduplicate(inbox_messages, sent_messages)
+        raw_messages = merge_and_deduplicate(inbox_messages + archive_messages + sent_messages)
         log.info(f"  {len(raw_messages)} messages after deduplication")
 
         message_records = []
