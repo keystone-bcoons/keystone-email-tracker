@@ -37,7 +37,7 @@ LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
-PAGE_SIZE      = 50
+PAGE_SIZE      = 999  # Graph API max for messages; reduces round-trips ~20x vs PAGE_SIZE=50
 
 # ─────────────────────────────────────────
 # Automated sender filtering
