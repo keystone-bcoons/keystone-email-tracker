@@ -42,7 +42,10 @@ PAGE_SIZE      = 50
 # ─────────────────────────────────────────
 # Automated sender filtering
 # ─────────────────────────────────────────
-# Local-part prefixes that indicate automated/system senders
+# Local-part prefixes that indicate automated/system senders.
+# Keep this list narrow — only unambiguously robotic addresses.
+# Do NOT include "info", "support", "auto" etc. — those are commonly used
+# by real humans at small businesses and would cause false-positive filtering.
 AUTOMATED_PREFIXES = {
     "noreply",
     "no-reply",
@@ -54,17 +57,11 @@ AUTOMATED_PREFIXES = {
     "notification",
     "alerts",
     "alert",
-    "automated",
-    "automailer",
-    "auto",
-    "mailer",
     "mailer-daemon",
     "mailerdaemon",
     "bounce",
     "bounces",
-    "info",
-    "support",
-    "noreply+",
+    "postmaster",
 }
 
 # Domains that are known automated/system senders
@@ -90,11 +87,12 @@ AUTOMATED_DOMAINS = {
     "em.stripe.com",
 }
 
-# Regex for catching common automated patterns not covered by exact prefix matching
+# Regex for catching common automated patterns not covered by exact prefix matching.
+# Intentionally conservative — only matches patterns that are unambiguously robotic.
 _AUTOMATED_RE = re.compile(
     r"^(noreply|no[_\-]?reply|donotreply|do[_\-]?not[_\-]?reply|"
-    r"notification[s]?|alert[s]?|automated?|auto|mailer|bounce[s]?|"
-    r"postmaster|daemon|system|robot|bot)[+\-_.]?",
+    r"notification[s]?|alert[s]?|mailer\-?daemon|bounce[s]?|"
+    r"postmaster|daemon)[+\-_.]?",
     re.IGNORECASE,
 )
 
@@ -219,13 +217,16 @@ def get_all_users(token: str) -> list[dict]:
 
 
 def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict]:
-    """Fetch messages from the inbox (received), filtered by receivedDateTime."""
+    """Fetch all received messages across ALL folders (Inbox, Archive, subfolders, etc.),
+    filtered by receivedDateTime. Using /messages instead of /mailFolders/Inbox/messages
+    is critical because Karbon moves cleared emails to Archive — the Inbox itself is nearly
+    empty while Archive holds the bulk of historical mail."""
     messages = []
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{GRAPH_BASE}/users/{user_id}/mailFolders/Inbox/messages"
+    url = f"{GRAPH_BASE}/users/{user_id}/messages"
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
-        "$filter": f"receivedDateTime ge {since_str}",
+        "$filter": f"receivedDateTime ge {since_str} and isDraft eq false",
         "$top": PAGE_SIZE,
         "$orderby": "receivedDateTime asc",
     }
