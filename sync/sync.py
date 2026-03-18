@@ -233,7 +233,9 @@ def fetch_inbox_messages(token: str, user_id: str, since: datetime) -> list[dict
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
         "$filter": f"receivedDateTime ge {since_str} and isDraft eq false",
         "$top": PAGE_SIZE,
-        "$orderby": "receivedDateTime asc",
+        # No $orderby — sorting forces Graph to scan & sort the full result set
+        # before returning page 1, which causes 504s on large mailboxes.
+        # We sort in-memory after fetching.
     }
     while url:
         try:
@@ -256,7 +258,7 @@ def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
         "$filter": f"sentDateTime ge {since_str}",
         "$top": PAGE_SIZE,
-        "$orderby": "sentDateTime asc",
+        # No $orderby — same reason as fetch_inbox_messages above.
     }
     while url:
         try:
