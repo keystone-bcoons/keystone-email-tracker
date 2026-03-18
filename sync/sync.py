@@ -34,6 +34,8 @@ SUPABASE_URL   = os.environ["SUPABASE_URL"]
 SUPABASE_KEY   = os.environ["SUPABASE_SERVICE_KEY"]
 TARGET_HOURS   = int(os.environ.get("TARGET_HOURS", 48))
 LOOKBACK_DAYS  = int(os.environ.get("LOOKBACK_DAYS", 90))
+# Optional: set to a single email address to sync only that user (useful for testing)
+SYNC_USER_EMAIL = os.environ.get("SYNC_USER_EMAIL", "").strip().lower()
 
 GRAPH_BASE     = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPES   = "https://graph.microsoft.com/.default"
@@ -399,6 +401,14 @@ def main():
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     users = get_all_users(token)
+
+    # If SYNC_USER_EMAIL is set, only process that one user (for targeted testing).
+    if SYNC_USER_EMAIL:
+        users = [u for u in users if u["email"] == SYNC_USER_EMAIL]
+        if not users:
+            log.error(f"SYNC_USER_EMAIL={SYNC_USER_EMAIL!r} not found in user list. Aborting.")
+            return
+        log.info(f"Targeted sync: only processing {SYNC_USER_EMAIL}")
 
     for user in users:
         email = user["email"]
