@@ -277,7 +277,7 @@ def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]
     return _fetch_folder(token, user_id, "SentItems", since)
 
 
-def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
+def merge_and_deduplicate(messages: list[dict]) -> list[dict]:
     """
     Merge inbox and sent messages, deduplicating by Graph message ID.
     Graph message IDs are unique within a mailbox, so no cross-folder
@@ -285,7 +285,7 @@ def merge_and_deduplicate(inbox: list[dict], sent: list[dict]) -> list[dict]:
     """
     seen: set[str] = set()
     merged: list[dict] = []
-    for m in inbox + sent:
+    for m in messages:
         mid = m.get("id", "")
         if mid and mid not in seen:
             seen.add(mid)
