@@ -234,7 +234,10 @@ def _fetch_folder(token: str, user_id: str, folder: str, since: datetime) -> lis
     params = {
         "$select": "id,subject,from,toRecipients,receivedDateTime,sentDateTime,conversationId,internetMessageId",
         "$top": PAGE_SIZE,
-        "$orderby": "receivedDateTime desc",  # newest first so we can stop early
+        # No $orderby and no $filter — both cause Graph to sort/scan the full
+        # folder before returning page 1, triggering 504 gateway timeouts.
+        # Exchange returns messages newest-first by default, so our client-side
+        # early-stop (when we hit a message older than `since`) still works.
     }
     while url:
         try:
