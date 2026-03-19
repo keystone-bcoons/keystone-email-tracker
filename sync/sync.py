@@ -322,6 +322,8 @@ def calculate_responses_from_db(sb: Client, team_email: str, team_name: str, sin
             .execute()
         )
         batch = result.data or []
+        raw_batch_size = len(batch)  # check BEFORE dedup — dedup always removes 1 row, which
+                                     # would make every page look like the last (999 < 1000)
 
         # De-duplicate the overlap at the cursor boundary (same received_at, different id)
         if last_id:
@@ -333,7 +335,7 @@ def calculate_responses_from_db(sb: Client, team_email: str, team_name: str, sin
         all_msgs.extend(batch)
         log.info(f"    DB fetch: loaded {len(all_msgs)} messages so far (batch {len(batch)})")
 
-        if len(batch) < batch_size:
+        if raw_batch_size < batch_size:  # use raw size — not post-dedup size
             break
 
         # Advance cursor to the last message's timestamp for the next page
