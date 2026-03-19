@@ -12,6 +12,26 @@ const supabase = createClient(
 const EXCLUDED_DOMAINS = [
   "keystonebookkeepers.com",
   "topkey.io",
+  "vrplatform.app",
+  "bookkeeperswob.com",
+  "cpaiexperts.com",
+  "relayfi.com",
+  "getsagan.com",
+  "rightworks.com",
+  "m.relayfi.com",
+  "su.getsagan.com",
+  "pmicorp.com",
+  "mondassur.com",
+  "karbonhq.com",
+  "paltrowco.com",
+  "tobeymerrill.com",
+  "getclearing.co",
+  "bofa.com",
+  "eversite.com",
+  "ignitionapp.com",
+  "kwbookkeeping.online",
+  "ximplifi.com",
+  "xenett.com",
 ];
 
 const PAGE_SIZE = 50;
