@@ -64,8 +64,6 @@ AUTOMATED_PREFIXES = {
     "mailerdaemon",
     "bounce",
     "bounces",
-    "info",
-    "support",
     "noreply+",
 }
 
@@ -440,6 +438,10 @@ def main():
         email = user["email"]
         name  = user["name"]
         log.info(f"Syncing {email}")
+
+        # Refresh token for each user — Graph tokens expire after 1 hour and a
+        # full team sync can take several hours, causing 401s for later users.
+        token = get_access_token()
 
         since = get_last_synced(sb, email)
         log.info(f"  Fetching messages since {since.date()}")
