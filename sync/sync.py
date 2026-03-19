@@ -279,9 +279,8 @@ def fetch_sent_messages(token: str, user_id: str, since: datetime) -> list[dict]
 
 def merge_and_deduplicate(messages: list[dict]) -> list[dict]:
     """
-    Merge inbox and sent messages, deduplicating by Graph message ID.
-    Graph message IDs are unique within a mailbox, so no cross-folder
-    duplicates are expected — but this guards against any overlap.
+    Deduplicate a combined list of messages by Graph message ID.
+    Handles any overlap between Inbox, Archive, and SentItems.
     """
     seen: set[str] = set()
     merged: list[dict] = []
@@ -304,24 +303,42 @@ def calculate_responses_from_db(sb: Client, team_email: str, team_name: str, sin
       - A client email and the reply may arrive in different sync runs.
       - After a full re-fetch we want to recalculate all pairs cleanly.
     """
+    # Use timestamp-cursor pagination to avoid Supabase row-limit issues with
+    # offset-based pagination (.range() can silently stop at the server's max_rows).
     all_msgs = []
-    offset = 0
+    cursor = since.isoformat()
+    last_id = ""
     batch_size = 1000
+
     while True:
         result = (
             sb.table("email_messages")
             .select("id,direction,conversation_id,client_email,client_name,subject,received_at")
             .eq("team_member_email", team_email)
-            .gte("received_at", since.isoformat())
+            .gte("received_at", cursor)
             .order("received_at", desc=False)
-            .range(offset, offset + batch_size - 1)
+            .order("id", desc=False)
+            .limit(batch_size)
             .execute()
         )
         batch = result.data or []
+
+        # De-duplicate the overlap at the cursor boundary (same received_at, different id)
+        if last_id:
+            batch = [m for m in batch if m["id"] != last_id or m["received_at"] != cursor]
+
+        if not batch:
+            break
+
         all_msgs.extend(batch)
+        log.info(f"    DB fetch: loaded {len(all_msgs)} messages so far (batch {len(batch)})")
+
         if len(batch) < batch_size:
             break
-        offset += batch_size
+
+        # Advance cursor to the last message's timestamp for the next page
+        cursor  = batch[-1]["received_at"]
+        last_id = batch[-1]["id"]
 
     by_conv: dict[str, list[dict]] = {}
     for m in all_msgs:
